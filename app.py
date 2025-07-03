@@ -1,44 +1,35 @@
 # -*- coding: utf-8 -*-
 
-# ---------------------------------------------------------------------------
-# app.py - Chatbot para Clínica usando Telegram, Twilio y OpenAI (ChatGPT)
-# ---------------------------------------------------------------------------
-# Este archivo contiene el código para un servidor web Flask que actúa como
-# webhook para Twilio, conectando un bot de Telegram con la API de OpenAI.
-#
-# Funcionalidad:
-# 1. Recibe mensajes de usuarios de Telegram a través de Twilio.
-# 2. Envía estos mensajes a la API de OpenAI para generar una respuesta inteligente.
-# 3. Devuelve la respuesta de la IA al usuario a través de Twilio.
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------
+# app.py - Conexión Directa a Telegram con OpenAI
+# ----------------------------------------------------------------------------------
+# Este código utiliza la librería python-telegram-bot para una conexión directa,
+# eliminando la necesidad de un intermediario como Twilio.
+# ----------------------------------------------------------------------------------
 
-# --- Importación de Librerías Necesarias ---
+# --- Importación de Librerías ---
 import os
-from flask import Flask, request
-from twilio.twiml.messaging_response import MessagingResponse
+import asyncio
+from flask import Flask, request, Response
+import telegram
 import openai
 
-# --- Configuración Inicial de la Aplicación ---
+# --- Configuración Inicial ---
 
-# Inicializa la aplicación Flask
 app = Flask(__name__)
 
-# Configura la clave de la API de OpenAI de forma segura.
-# ¡IMPORTANTE! No escribas tu clave aquí.
-# Debes configurarla como una "Variable de Entorno" en tu plataforma de despliegue (Render, PythonAnywhere, etc.).
-# Nombre de la variable: OPENAI_API_KEY
-try:
-    openai.api_key = os.environ.get('OPENAI_API_KEY')
-    if not openai.api_key:
-        print("ADVERTENCIA: La variable de entorno OPENAI_API_KEY no está configurada.")
-except Exception as e:
-    print(f"Error al configurar la clave de OpenAI: {e}")
+# --- Claves y Tokens (Configuración Segura) ---
 
+# Token de tu bot de Telegram (obtenido de BotFather)
+# Configúralo como una Variable de Entorno en Render: TELEGRAM_TOKEN
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+
+# Clave de la API de OpenAI
+# Configúrala como una Variable de Entorno en Render: OPENAI_API_KEY
+openai.api_key = os.environ.get('OPENAI_API_KEY')
 
 # --- "Cerebro" del Asistente Virtual (System Prompt) ---
-# Este es el contexto principal que define la personalidad, las tareas y
-# las reglas de nuestro asistente de IA. Es la parte más importante para
-# guiar el comportamiento del modelo.
+# Este es el mismo prompt que ya diseñamos para la clínica.
 SYSTEM_PROMPT = """
 Rol: Eres "Salud-Bot", el asistente virtual oficial de la "Clínica Salud Integral". Tu personalidad es amable, empática, eficiente y extremadamente profesional. Tu misión es facilitar la gestión de citas y resolver dudas administrativas.
 
@@ -55,76 +46,65 @@ Reglas y Limitaciones Estrictas e Inquebrantables:
 -   NUNCA, bajo ninguna circunstancia, ofrezcas consejos médicos, diagnósticos, interpretaciones de síntomas o información sobre medicamentos. Si un usuario pregunta por temas médicos, DEBES responder exclusivamente con: "Como asistente virtual, no estoy calificado para dar consejos médicos. Por favor, agenda una cita para que un especialista pueda ayudarte".
 -   Sé siempre cortés y utiliza un lenguaje claro, sencillo y profesional.
 -   Si te preguntan algo fuera de tu alcance (temas no relacionados con la Clínica Salud Integral), responde con: "Mi función es ayudarte con los servicios de la Clínica Salud Integral. ¿Cómo puedo asistirte con eso?".
--   Al confirmar una cita, siempre presenta un resumen claro: "Perfecto. Su cita ha sido agendada para el [Día] a las [Hora] con el/la Dr./Dra. [Nombre del Médico] en la especialidad de [Especialidad]. ¿Es correcto?".
 """
 
 def generar_respuesta_con_ia(mensaje_usuario: str) -> str:
     """
-    Envía el mensaje del usuario a la API de OpenAI junto con el contexto del sistema
-    y devuelve la respuesta generada por la inteligencia artificial.
-
-    Args:
-        mensaje_usuario: El texto del mensaje enviado por el usuario.
-
-    Returns:
-        La respuesta generada por el modelo de OpenAI.
+    Envía el mensaje del usuario a la API de OpenAI y devuelve la respuesta.
     """
     if not openai.api_key:
-        return "Error de configuración: La clave de API de OpenAI no ha sido establecida. Por favor, contacte al administrador."
-
+        return "Error de configuración: La clave de API de OpenAI no está configurada."
     try:
-        # Realiza la llamada a la API de Chat Completions de OpenAI
         response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",  # Modelo rápido y eficiente para chatbots
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": mensaje_usuario}
             ],
-            temperature=0.7,  # Creatividad moderada para respuestas naturales pero consistentes
-            max_tokens=250    # Límite de longitud para evitar respuestas demasiado largas
+            temperature=0.7
         )
-        # Extrae el contenido del mensaje de la respuesta
         return response.choices[0].message.content.strip()
     except Exception as e:
-        # Manejo de errores en caso de que la API de OpenAI falle
-        print(f"ERROR: No se pudo conectar con la API de OpenAI. Detalles: {e}")
-        return "Lo siento, estoy experimentando problemas técnicos en este momento. Por favor, intenta de nuevo en unos minutos."
+        print(f"Error al contactar con OpenAI: {e}")
+        return "Lo siento, estoy teniendo problemas técnicos en este momento."
 
-
-# --- Webhook para Recibir Mensajes de Telegram vía Twilio ---
-# Esta es la ruta que configurarás en la consola de Twilio.
-# Twilio reenviará todos los mensajes que lleguen a tu bot de Telegram a esta URL.
-@app.route("/telegram", methods=['POST'])
+# --- Webhook para Recibir Mensajes de Telegram ---
+# Esta es la ruta que le daremos a Telegram para que nos envíe las actualizaciones.
+@app.route("/webhook", methods=['POST'])
 def telegram_webhook():
     """
-    Procesa los mensajes entrantes de Telegram.
+    Procesa las actualizaciones (mensajes) que envía Telegram.
     """
-    # Extrae el cuerpo del mensaje del usuario de la petición de Twilio
-    mensaje_recibido = request.values.get('Body', '').strip()
-    print(f"Mensaje recibido de Telegram: '{mensaje_recibido}'")
+    update_data = request.get_json()
+    print("Datos recibidos de Telegram:", update_data)
 
-    # Prepara el objeto de respuesta de Twilio
-    respuesta_twilio = MessagingResponse()
+    if 'message' in update_data:
+        chat_id = update_data['message']['chat']['id']
+        mensaje_recibido = update_data['message'].get('text', '')
 
-    # Si el mensaje está vacío, no hace falta procesarlo
-    if not mensaje_recibido:
-        respuesta_twilio.message("Por favor, envía un mensaje de texto.")
-        return str(respuesta_twilio)
+        if mensaje_recibido:
+            # Genera la respuesta con IA
+            respuesta_ia = generar_respuesta_con_ia(mensaje_recibido)
 
-    # 1. Obtiene la respuesta inteligente de la función de OpenAI
-    respuesta_ia = generar_respuesta_con_ia(mensaje_recibido)
-    print(f"Respuesta generada por IA: '{respuesta_ia}'")
+            # Envía la respuesta de vuelta al usuario usando la librería de Telegram
+            # Usamos asyncio para manejar la operación asíncrona de forma simple
+            asyncio.run(enviar_mensaje_telegram(chat_id, respuesta_ia))
 
-    # 2. Añade la respuesta de la IA al objeto de respuesta de Twilio
-    respuesta_twilio.message(respuesta_ia)
+    # Telegram espera una respuesta HTTP 200 OK para saber que recibimos el mensaje.
+    return Response(status=200)
 
-    # 3. Devuelve la respuesta en formato TwiML para que Twilio la envíe a Telegram
-    return str(respuesta_twilio)
+async def enviar_mensaje_telegram(chat_id, texto):
+    """
+    Función asíncrona para enviar un mensaje a un chat de Telegram.
+    """
+    if not TELEGRAM_TOKEN:
+        print("Error: El token de Telegram no está configurado.")
+        return
 
+    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    await bot.send_message(chat_id=chat_id, text=texto)
 
-# --- Punto de Entrada para Ejecutar la Aplicación ---
-# Este bloque se ejecuta solo si corres el archivo directamente (ej. `python app.py`)
-# No es utilizado por Gunicorn en producción, pero es útil para pruebas locales.
-if __name__ == "__main__":
-    # El modo debug es útil para desarrollo, pero debe estar en False en producción.
-    app.run(port=5000, debug=True)
+# Punto de entrada para Gunicorn en Render
+if __name__ != '__main__':
+    # Esta configuración es para asegurar que Gunicorn pueda encontrar la app
+    gunicorn_app = app
